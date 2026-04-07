@@ -24,6 +24,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 // CORS — set CLIENT_ORIGINS on Render (comma-separated), e.g. https://shoe-testing-frontend.vercel.app
 const localDevOrigins = [
   'http://localhost:3000',
+  'https://shoe-testing-frontend.vercel.app',
   'http://localhost:3001',
   'http://127.0.0.1:3000',
   'http://127.0.0.1:3001',
