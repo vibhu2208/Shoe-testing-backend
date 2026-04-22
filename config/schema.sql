@@ -25,9 +25,9 @@ $$ language 'plpgsql';
 CREATE TRIGGER update_users_updated_at BEFORE UPDATE ON users
     FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
--- Insert default admin user (password: password)
+-- Insert default admin user (password: admin123)
 INSERT INTO users (name, email, password, role, department, is_active) 
-VALUES ('Admin User', 'admin@example.com', '$2a$10$rOzJqQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQjQ', 'admin', 'Administration', true)
+VALUES ('Admin User', 'admin@example.com', '$2a$10$zVc7uNqHwdTVo.cC0y66heP73YEvTT.U4cmphvy83rA3eVouOtAS2', 'admin', 'Administration', true)
 ON CONFLICT (email) DO NOTHING;
 
 -- Seed some testers for development

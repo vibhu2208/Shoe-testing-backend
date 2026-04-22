@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const nodemailer = require('nodemailer');
+const multer = require('multer');
 const path = require('path');
 require('dotenv').config();
 
@@ -20,6 +22,7 @@ const periodicRoutes = require('./routes/periodic');
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET;
+const BUG_REPORT_TO_EMAIL = process.env.BUG_REPORT_TO_EMAIL || 'vaibhav.kaushik@ttsys.in';
 
 // CORS — set CLIENT_ORIGINS on Render (comma-separated), e.g. https://shoe-testing-frontend.vercel.app
 const localDevOrigins = [
@@ -86,6 +89,43 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
+
+const buildBugReportTransporter = () => {
+  const host = process.env.SMTP_HOST;
+  const port = Number(process.env.SMTP_PORT || 587);
+  const secure = process.env.SMTP_SECURE === 'true';
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  if (!host || !user || !pass) {
+    return null;
+  }
+
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure,
+    auth: { user, pass },
+  });
+};
+
+const bugAttachmentUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max screenshot
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype || !file.mimetype.startsWith('image/')) {
+      return cb(new Error('Only image files are allowed for screenshot upload'));
+    }
+    cb(null, true);
+  },
+});
+
+const escapeHtml = (value) => String(value || '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;');
 
 // Authentication routes
 app.post('/api/auth/login', async (req, res) => {
@@ -299,6 +339,116 @@ app.delete('/api/admin/users/:userId', authenticateToken, async (req, res) => {
 
   } catch (error) {
     console.error('Delete user error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+app.post('/api/bug-report', bugAttachmentUpload.single('screenshot'), async (req, res) => {
+  try {
+    const { title, description, priority, reporterEmail, pagePath, userAgent } = req.body || {};
+
+    if (!title || !description) {
+      return res.status(400).json({ error: 'Title and description are required' });
+    }
+
+    const normalizedPriority = String(priority || 'medium').toLowerCase();
+    const allowedPriorities = ['low', 'medium', 'high', 'critical'];
+    if (!allowedPriorities.includes(normalizedPriority)) {
+      return res.status(400).json({ error: 'Invalid priority value' });
+    }
+
+    let reporter = null;
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    if (token) {
+      try {
+        reporter = jwt.verify(token, JWT_SECRET);
+      } catch {
+        reporter = null;
+      }
+    }
+
+    const transporter = buildBugReportTransporter();
+    if (!transporter) {
+      console.error('Bug report failed: SMTP is not configured');
+      return res.status(500).json({ error: 'Bug reporting email service is not configured' });
+    }
+
+    const submittedAt = new Date().toISOString();
+    const finalReporterEmail = reporterEmail || reporter?.email || 'not-provided';
+    const finalReporterName = reporter?.name || 'Unknown user';
+    const screenshot = req.file || null;
+    const screenshotName = screenshot?.originalname || 'none';
+    const screenshotSize = screenshot ? `${Math.round((screenshot.size / 1024) * 100) / 100} KB` : 'none';
+
+    const textBody = [
+      'New Bug Report',
+      `Submitted At: ${submittedAt}`,
+      `Priority: ${normalizedPriority}`,
+      `Title: ${title}`,
+      `Reporter Name: ${finalReporterName}`,
+      `Reporter Email: ${finalReporterEmail}`,
+      `Reporter Role: ${reporter?.role || 'unknown'}`,
+      `Page Path: ${pagePath || 'unknown'}`,
+      `IP: ${req.ip || 'unknown'}`,
+      `User Agent: ${userAgent || req.headers['user-agent'] || 'unknown'}`,
+      `Screenshot: ${screenshotName} (${screenshotSize})`,
+      '',
+      'Description:',
+      String(description),
+    ].join('\n');
+
+    const htmlBody = `
+      <div style="font-family:Arial,sans-serif;background:#f6f8fb;padding:24px;">
+        <div style="max-width:760px;margin:0 auto;background:#ffffff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;">
+          <div style="padding:16px 20px;background:#111827;color:#ffffff;">
+            <h2 style="margin:0;font-size:18px;">New Bug Report Submitted</h2>
+          </div>
+          <div style="padding:20px;">
+            <table style="width:100%;border-collapse:collapse;font-size:14px;">
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;width:180px;"><strong>Title</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(title)}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Priority</strong></td><td style="padding:8px;border:1px solid #e5e7eb;text-transform:uppercase;">${escapeHtml(normalizedPriority)}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Submitted At</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(submittedAt)}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Reporter Name</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(finalReporterName)}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Reporter Email</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(finalReporterEmail)}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Reporter Role</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(reporter?.role || 'unknown')}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Page Path</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(pagePath || 'unknown')}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>IP Address</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(req.ip || 'unknown')}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>User Agent</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(userAgent || req.headers['user-agent'] || 'unknown')}</td></tr>
+              <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Screenshot</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(screenshotName)} (${escapeHtml(screenshotSize)})</td></tr>
+            </table>
+            <h3 style="margin:20px 0 10px;font-size:16px;color:#111827;">Bug Description</h3>
+            <div style="padding:12px;border:1px solid #e5e7eb;border-radius:8px;background:#fafafa;white-space:pre-wrap;line-height:1.5;">${escapeHtml(description)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      to: BUG_REPORT_TO_EMAIL,
+      subject: `[Bug Report][${normalizedPriority.toUpperCase()}] ${String(title).slice(0, 120)}`,
+      text: textBody,
+      html: htmlBody,
+      attachments: screenshot ? [{
+        filename: screenshot.originalname || 'screenshot.png',
+        content: screenshot.buffer,
+        contentType: screenshot.mimetype,
+      }] : [],
+    });
+
+    res.status(201).json({ message: 'Bug report sent successfully' });
+  } catch (error) {
+    if (error instanceof multer.MulterError) {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ error: 'Screenshot must be 5MB or smaller' });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+    console.error('Bug report error:', error);
+    if (error && error.message === 'Only image files are allowed for screenshot upload') {
+      return res.status(400).json({ error: error.message });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });
