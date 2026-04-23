@@ -28,11 +28,12 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024 // 10MB limit
   },
   fileFilter: function (req, file, cb) {
-    // Only allow PDF files
-    if (file.mimetype === 'application/pdf') {
+    // Allow PDF and JPEG/JPG files for Reducto parsing
+    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg'];
+    if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF files are allowed'), false);
+      cb(new Error('Only PDF and JPEG/JPG files are allowed'), false);
     }
   }
 });

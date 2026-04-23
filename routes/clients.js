@@ -398,7 +398,18 @@ router.post('/', async (req, res) => {
 
   } catch (error) {
     console.error('Error creating client:', error);
-    res.status(500).json({ error: 'Failed to create client' });
+    if (error.code === '23505') {
+      if (error.constraint && error.constraint.includes('client_code')) {
+        return res.status(409).json({ error: 'Client code already exists. Please use a unique client code.' });
+      }
+      return res.status(409).json({ error: 'Client already exists with the provided unique fields.' });
+    }
+
+    if (error.code === '23503') {
+      return res.status(400).json({ error: 'Invalid related data provided while creating client.' });
+    }
+
+    res.status(500).json({ error: error.message || 'Failed to create client' });
   }
 });
 
