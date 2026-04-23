@@ -30,6 +30,89 @@ const parseBulkRowsFromBuffer = (file) => {
   return XLSX.utils.sheet_to_json(sheet, { defval: '' });
 };
 
+const createArticleWithTests = async ({
+  clientId = null,
+  articleNumber,
+  articleName,
+  materialType,
+  color,
+  description,
+  specifications,
+  tests
+}) => {
+  if (!articleNumber || !String(articleNumber).trim() || !articleName || !String(articleName).trim()) {
+    const error = new Error('articleNumber and articleName are required');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  return dbAdapter.transaction(async (client) => {
+    const articleResult = await client.query(`
+      INSERT INTO articles (
+        client_id, article_number, article_name, material_type,
+        color, description, specifications, status
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
+      RETURNING id, client_id, article_number, created_at
+    `, [
+      clientId,
+      String(articleNumber).trim(),
+      String(articleName).trim(),
+      materialType || null,
+      color || null,
+      description || null,
+      JSON.stringify(specifications || null)
+    ]);
+
+    const newArticle = articleResult.rows[0];
+
+    if (tests && tests.length > 0) {
+      const batchNumber = `BATCH-${String(Date.now()).slice(-6)}`;
+
+      const batchResult = await client.query(`
+        INSERT INTO test_batches (article_id, batch_number, notes, status)
+        VALUES ($1, $2, $3, 'active') RETURNING id
+      `, [newArticle.id, batchNumber, 'Initial test batch']);
+
+      const batchId = batchResult.rows[0].id;
+
+      for (const test of tests) {
+        await client.query(`
+          INSERT INTO article_tests (
+            article_id, batch_id, test_name, test_standard, client_requirement,
+            category, execution_type, inhouse_test_id, vendor_name, vendor_contact,
+            vendor_email, expected_report_date, assigned_tester_id, test_deadline,
+            assigned_at, assigned_by, notes, status
+          ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+          )
+        `, [
+          newArticle.id,
+          batchId,
+          test.testName || test.test_name,
+          test.standard || test.standard_method,
+          test.clientRequirement || test.client_requirement,
+          test.category,
+          test.executionType || test.execution_type,
+          test.inhouseTestId || test.inhouse_test_id,
+          test.vendorName || test.vendor_name,
+          test.vendorContact || test.vendor_contact,
+          test.vendorEmail || test.vendor_email,
+          test.expectedReportDate || test.expected_report_date,
+          test.assignedTesterId || test.assigned_tester_id || null,
+          test.testDeadline || test.test_deadline || null,
+          test.assignedTesterId || test.assigned_tester_id ? new Date() : null,
+          test.assignedTesterId || test.assigned_tester_id ? 1 : null,
+          test.notes || null,
+          test.assignedTesterId || test.assigned_tester_id ? 'assigned' : 'pending'
+        ]);
+      }
+    }
+
+    return newArticle;
+  });
+};
+
 // Get all articles for a client
 router.get('/clients/:clientId/articles', async (req, res) => {
   try {
@@ -301,69 +384,15 @@ router.post('/clients/:clientId/articles', async (req, res) => {
     console.log('📦 Creating new article for client:', clientId);
     console.log('📋 Article data:', { articleNumber, articleName, testsCount: tests?.length });
     
-    const result = await dbAdapter.transaction(async (client) => {
-      // Create new article
-      const articleResult = await client.query(`
-        INSERT INTO articles (
-          client_id, article_number, article_name, material_type, 
-          color, description, specifications, status
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')
-        RETURNING id, article_number, created_at
-      `, [clientId, articleNumber, articleName, materialType, color, description, JSON.stringify(specifications)]);
-      
-      const newArticle = articleResult.rows[0];
-      console.log('✅ Article created:', newArticle);
-      
-      // Create initial test batch if tests are provided
-      if (tests && tests.length > 0) {
-        const batchNumber = `BATCH-${String(Date.now()).slice(-6)}`;
-        console.log('📋 Creating initial test batch:', batchNumber);
-        
-        const batchResult = await client.query(`
-          INSERT INTO test_batches (article_id, batch_number, notes, status)
-          VALUES ($1, $2, $3, 'active') RETURNING id
-        `, [newArticle.id, batchNumber, 'Initial test batch']);
-        
-        const batchId = batchResult.rows[0].id;
-        
-        // Insert tests
-        for (const test of tests) {
-          console.log('🧪 Inserting test:', test.testName);
-          await client.query(`
-            INSERT INTO article_tests (
-              article_id, batch_id, test_name, test_standard, client_requirement,
-              category, execution_type, inhouse_test_id, vendor_name, vendor_contact,
-              vendor_email, expected_report_date, assigned_tester_id, test_deadline, 
-              assigned_at, assigned_by, notes, status
-            ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
-            )
-          `, [
-            newArticle.id,
-            batchId,
-            test.testName || test.test_name,
-            test.standard || test.standard_method,
-            test.clientRequirement || test.client_requirement,
-            test.category,
-            test.executionType || test.execution_type,
-            test.inhouseTestId || test.inhouse_test_id,
-            test.vendorName || test.vendor_name,
-            test.vendorContact || test.vendor_contact,
-            test.vendorEmail || test.vendor_email,
-            test.expectedReportDate || test.expected_report_date,
-            test.assignedTesterId || test.assigned_tester_id || null,
-            test.testDeadline || test.test_deadline || null,
-            test.assignedTesterId || test.assigned_tester_id ? new Date() : null,
-            test.assignedTesterId || test.assigned_tester_id ? 1 : null, // Admin user ID
-            test.notes || null,
-            test.assignedTesterId || test.assigned_tester_id ? 'assigned' : 'pending'
-          ]);
-        }
-        console.log('✅ All tests inserted successfully');
-      }
-      
-      return newArticle;
+    const result = await createArticleWithTests({
+      clientId,
+      articleNumber,
+      articleName,
+      materialType,
+      color,
+      description,
+      specifications,
+      tests
     });
     
     res.status(201).json({
@@ -374,6 +403,50 @@ router.post('/clients/:clientId/articles', async (req, res) => {
     console.error('❌ Error creating article:', error);
     if (error.code === '23505') { // Unique constraint violation
       res.status(400).json({ error: 'Article number already exists for this client' });
+    } else if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+    } else {
+      res.status(500).json({ error: 'Failed to create article' });
+    }
+  }
+});
+
+// Create new article without linking to client
+router.post('/articles', async (req, res) => {
+  try {
+    const {
+      articleNumber,
+      articleName,
+      materialType,
+      color,
+      description,
+      specifications,
+      tests,
+      clientId
+    } = req.body;
+
+    console.log('📦 Creating standalone article');
+    const result = await createArticleWithTests({
+      clientId: clientId || null,
+      articleNumber,
+      articleName,
+      materialType,
+      color,
+      description,
+      specifications,
+      tests
+    });
+
+    res.status(201).json({
+      message: 'Article created successfully',
+      article: result
+    });
+  } catch (error) {
+    console.error('❌ Error creating standalone article:', error);
+    if (error.code === '23505') {
+      res.status(400).json({ error: 'Article number already exists' });
+    } else if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
     } else {
       res.status(500).json({ error: 'Failed to create article' });
     }
@@ -668,7 +741,7 @@ router.get('/articles', async (req, res) => {
         COUNT(DISTINCT tb.id) as total_batches,
         COUNT(CASE WHEN at.status IN ('submitted', 'pass', 'fail') THEN 1 END) as completed_tests
       FROM articles a
-      JOIN clients c ON a.client_id = c.id
+      LEFT JOIN clients c ON a.client_id = c.id
       LEFT JOIN article_tests at ON a.id = at.article_id
       LEFT JOIN test_batches tb ON a.id = tb.article_id
       WHERE a.status = 'active'
@@ -765,7 +838,7 @@ async function generateAndPersistReport({ testId, forceRegenerate = false }) {
         c.client_code
       FROM article_tests at
       JOIN articles a ON a.id = at.article_id
-      JOIN clients c ON c.id = a.client_id
+      LEFT JOIN clients c ON c.id = a.client_id
       WHERE at.id = $1`,
       [testId]
     );
@@ -798,7 +871,8 @@ async function generateAndPersistReport({ testId, forceRegenerate = false }) {
     });
 
     const safeReportName = reportNumber.replace(/[^a-zA-Z0-9 _-]/g, '').replace(/\s+/g, '_');
-    const relDir = path.join('reports', String(t.client_id), String(t.article_id), String(t.id));
+    const reportClientDir = t.client_id ? String(t.client_id) : 'unassigned';
+    const relDir = path.join('reports', reportClientDir, String(t.article_id), String(t.id));
     const absDir = path.resolve(__dirname, '..', relDir);
     await fs.mkdir(absDir, { recursive: true });
     const fileName = `CoA_${safeReportName}.docx`;

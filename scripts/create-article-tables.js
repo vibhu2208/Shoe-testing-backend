@@ -26,7 +26,7 @@ async function createArticleTables() {
       await db.execute(`
         CREATE TABLE IF NOT EXISTS articles (
           id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-          client_id UUID NOT NULL,
+          client_id UUID,
           article_number VARCHAR(100) NOT NULL,
           article_name VARCHAR(255) NOT NULL,
           material_type VARCHAR(100),
@@ -50,6 +50,11 @@ async function createArticleTables() {
       console.log('✅ Articles table created');
     } else {
       console.log('✅ Articles table already exists');
+      await db.execute(`
+        ALTER TABLE articles
+        ALTER COLUMN client_id DROP NOT NULL;
+      `);
+      console.log('✅ Ensured articles.client_id is optional');
     }
     
     // Check if test_batches table exists
