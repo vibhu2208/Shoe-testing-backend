@@ -104,10 +104,14 @@ async function advanceAfterPeriodicSubmit(client, articleTestId, resultPassFail,
     return { advanced: true, error: 'source test missing' };
   }
   const t = srcRes.rows[0];
-  const testerId =
+  const { getDefaultTesterId, shouldAssignDefaultTester } = require('./defaultTester');
+  let testerId =
     preferredTesterId != null
       ? Number(preferredTesterId)
       : (run.assigned_tester_id != null ? run.assigned_tester_id : t.assigned_tester_id);
+  if (testerId == null && shouldAssignDefaultTester(t.execution_type)) {
+    testerId = await getDefaultTesterId(client);
+  }
   const nextStatus = testerId != null ? 'assigned' : 'pending';
   const nextAssignedAt = testerId != null ? new Date().toISOString() : null;
 

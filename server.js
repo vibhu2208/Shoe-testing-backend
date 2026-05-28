@@ -9,6 +9,7 @@ require('dotenv').config();
 
 // Use PostgreSQL database adapter
 const dbAdapter = require('./config/dbAdapter');
+const { getDefaultTesterId } = require('./services/defaultTester');
 
 // Import routes
 const testLibraryRoutes = require('./routes/testLibrary');
@@ -138,9 +139,11 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     const users = await dbAdapter.query(
-      'SELECT * FROM users WHERE email = $1',
-      [email]
+      'SELECT * FROM users WHERE LOWER(email) = $1',
+      [normalizedEmail]
     );
     
     if (users.length === 0) {
@@ -160,11 +163,9 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
 
-    // Auto-detect role from user record or validate if role is provided
+    // Role always comes from the database record (optional client hint is ignored)
     if (role && role !== user.role) {
-      return res.status(401).json({
-        error: 'Invalid credentials'
-      });
+      console.warn(`Login role hint "${role}" ignored; using account role "${user.role}"`);
     }
 
     const token = jwt.sign(
@@ -265,9 +266,11 @@ app.post('/api/admin/users', authenticateToken, async (req, res) => {
     }
 
     // Check if user already exists
+    const normalizedEmail = String(email).trim().toLowerCase();
+
     const existingUsers = await dbAdapter.query(
-      'SELECT id FROM users WHERE email = $1',
-      [email]
+      'SELECT id FROM users WHERE LOWER(email) = $1',
+      [normalizedEmail]
     );
 
     if (existingUsers.length > 0) {
@@ -282,7 +285,7 @@ app.post('/api/admin/users', authenticateToken, async (req, res) => {
     // Create user
     const result = await dbAdapter.execute(
       'INSERT INTO users (name, email, password, role) VALUES ($1, $2, $3, $4) RETURNING id, name, email, role, created_at',
-      [name, email, hashedPassword, role]
+      [name, normalizedEmail, hashedPassword, role]
     );
 
     const newUser = result.rows[0];
@@ -329,16 +332,98 @@ app.delete('/api/admin/users/:userId', authenticateToken, async (req, res) => {
       });
     }
 
-    // Delete user
-    await dbAdapter.execute(
-      'DELETE FROM users WHERE id = $1',
-      [userId]
-    );
+    const numericUserId = Number(userId);
+
+    await dbAdapter.transaction(async (client) => {
+      let reassignTo = await getDefaultTesterId(client);
+      if (reassignTo === numericUserId) reassignTo = null;
+
+      await client.query(
+        `UPDATE periodic_test_runs
+         SET assigned_tester_id = $1::integer, updated_at = NOW()
+         WHERE assigned_tester_id = $2`,
+        [reassignTo, numericUserId]
+      );
+
+      await client.query(
+        `UPDATE periodic_schedules
+         SET assigned_tester_id = $1::integer, updated_at = NOW()
+         WHERE assigned_tester_id = $2`,
+        [reassignTo, numericUserId]
+      );
+
+      await client.query(
+        `UPDATE periodic_schedules
+         SET created_by = NULL, updated_at = NOW()
+         WHERE created_by = $1`,
+        [numericUserId]
+      );
+
+      await client.query(
+        `UPDATE article_tests SET
+           assigned_tester_id = $1::integer,
+           status = CASE
+             WHEN $1::integer IS NOT NULL AND status IN ('pending', 'assigned') THEN 'assigned'
+             WHEN $1::integer IS NULL AND status = 'assigned' THEN 'pending'
+             ELSE status
+           END,
+           assigned_at = CASE
+             WHEN $1::integer IS NOT NULL THEN COALESCE(assigned_at, NOW())
+             ELSE NULL
+           END,
+           updated_at = NOW()
+         WHERE assigned_tester_id = $2`,
+        [reassignTo, numericUserId]
+      );
+
+      await client.query(
+        `UPDATE article_tests SET assigned_by = NULL, updated_at = NOW() WHERE assigned_by = $1`,
+        [numericUserId]
+      );
+
+      await client.query(
+        `UPDATE order_tests SET
+           assigned_tester_id = $1::integer,
+           status = CASE
+             WHEN $1::integer IS NOT NULL AND status IN ('pending', 'assigned') THEN 'assigned'
+             WHEN $1::integer IS NULL AND status = 'assigned' THEN 'pending'
+             ELSE status
+           END,
+           updated_at = NOW()
+         WHERE assigned_tester_id = $2`,
+        [reassignTo, numericUserId]
+      ).catch(() => {});
+
+      await client.query(
+        `UPDATE order_tests SET assigned_by = NULL, updated_at = NOW() WHERE assigned_by = $1`,
+        [numericUserId]
+      ).catch(() => {});
+
+      await client.query(
+        `UPDATE retest_requests SET requested_by = 1 WHERE requested_by = $1`,
+        [numericUserId]
+      ).catch(() => {});
+
+      const deleted = await client.query('DELETE FROM users WHERE id = $1', [numericUserId]);
+      if (deleted.rowCount === 0) {
+        const err = new Error('User not found');
+        err.statusCode = 404;
+        throw err;
+      }
+    });
 
     res.json({ message: 'User deleted successfully' });
 
   } catch (error) {
     console.error('Delete user error:', error);
+    if (error.statusCode === 404) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    if (error.code === '23503') {
+      return res.status(409).json({
+        error: 'Cannot delete this user because they are still linked to records that could not be reassigned. Deactivate the account instead, or contact support.'
+      });
+    }
     res.status(500).json({ error: 'Internal server error' });
   }
 });

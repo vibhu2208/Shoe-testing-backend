@@ -1,6 +1,27 @@
 const express = require('express');
 const dbAdapter = require('../config/dbAdapter');
+const { enrichTestRecord } = require('../data/testLibraryMetadata');
 const router = express.Router();
+
+function parseTestRow(row) {
+  const test = {
+    ...row,
+    key_tags: typeof row.key_tags === 'string' ? JSON.parse(row.key_tags || '[]') : row.key_tags || [],
+    input_parameters:
+      typeof row.input_parameters === 'string'
+        ? JSON.parse(row.input_parameters || '{}')
+        : row.input_parameters || {},
+    calculation_steps:
+      typeof row.calculation_steps === 'string'
+        ? JSON.parse(row.calculation_steps || '[]')
+        : row.calculation_steps || [],
+    pass_fail_logic:
+      typeof row.pass_fail_logic === 'string'
+        ? JSON.parse(row.pass_fail_logic || '{}')
+        : row.pass_fail_logic || {}
+  };
+  return enrichTestRecord(test);
+}
 
 // GET /api/tests - Get all tests with optional filtering
 router.get('/', async (req, res) => {
@@ -34,15 +55,7 @@ router.get('/', async (req, res) => {
     query += ' ORDER BY category, name';
 
     const tests = await dbAdapter.query(query, params);
-    
-    // Parse JSON fields (handle both string and object types)
-    const formattedTests = tests.map(test => ({
-      ...test,
-      key_tags: typeof test.key_tags === 'string' ? JSON.parse(test.key_tags || '[]') : test.key_tags || [],
-      input_parameters: typeof test.input_parameters === 'string' ? JSON.parse(test.input_parameters || '{}') : test.input_parameters || {},
-      calculation_steps: typeof test.calculation_steps === 'string' ? JSON.parse(test.calculation_steps || '[]') : test.calculation_steps || [],
-      pass_fail_logic: typeof test.pass_fail_logic === 'string' ? JSON.parse(test.pass_fail_logic || '{}') : test.pass_fail_logic || {}
-    }));
+    const formattedTests = tests.map(parseTestRow);
 
     res.json({ tests: formattedTests });
   } catch (error) {
@@ -88,13 +101,7 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Test not found' });
     }
 
-    const test = {
-      ...tests[0],
-      key_tags: typeof tests[0].key_tags === 'string' ? JSON.parse(tests[0].key_tags || '[]') : tests[0].key_tags || [],
-      input_parameters: typeof tests[0].input_parameters === 'string' ? JSON.parse(tests[0].input_parameters || '{}') : tests[0].input_parameters || {},
-      calculation_steps: typeof tests[0].calculation_steps === 'string' ? JSON.parse(tests[0].calculation_steps || '[]') : tests[0].calculation_steps || [],
-      pass_fail_logic: typeof tests[0].pass_fail_logic === 'string' ? JSON.parse(tests[0].pass_fail_logic || '{}') : tests[0].pass_fail_logic || {}
-    };
+    const test = parseTestRow(tests[0]);
 
     res.json({ test });
   } catch (error) {
@@ -442,17 +449,47 @@ function calculateHotAirOven(inputData, clientSpecs) {
   };
 }
 
+function normalizeMaterialAbrasionStages(stages) {
+  if (stages == null) return {};
+  if (Array.isArray(stages)) {
+    const normalized = {};
+    for (const item of stages) {
+      if (!item || typeof item !== 'object') continue;
+      const cycle = item.cycles ?? item.cycle ?? item.stage;
+      if (cycle == null) continue;
+      normalized[cycle] = {
+        required: item.required !== false,
+        status: item.result === 'FAIL' || item.status === 'FAIL' ? 'FAIL' : 'OK',
+        damage_type: item.damage_type || '',
+        remarks: item.remarks || ''
+      };
+    }
+    return normalized;
+  }
+  if (typeof stages === 'object') return stages;
+  return {};
+}
+
 function calculateMaterialAbrasion(inputData, clientSpecs) {
-  const { dry_stages, wet_stages } = inputData;
-  
-  // Check dry stages
-  const required_dry_stages = Object.entries(dry_stages).filter(([cycle, data]) => data.required);
-  const dry_passes = required_dry_stages.every(([cycle, data]) => data.status === 'OK');
-  
-  // Check wet stages
-  const required_wet_stages = Object.entries(wet_stages).filter(([cycle, data]) => data.required);
-  const wet_passes = required_wet_stages.every(([cycle, data]) => data.status === 'OK');
-  
+  const dry_stages = normalizeMaterialAbrasionStages(inputData.dry_stages);
+  const wet_stages = normalizeMaterialAbrasionStages(inputData.wet_stages);
+
+  const required_dry_stages = Object.entries(dry_stages).filter(([, data]) => data && data.required);
+  const required_wet_stages = Object.entries(wet_stages).filter(([, data]) => data && data.required);
+
+  if (required_dry_stages.length === 0 && required_wet_stages.length === 0) {
+    throw new Error(
+      'Select at least one dry or wet cycle stage as required (per client specification) before calculating.'
+    );
+  }
+
+  const dry_passes =
+    required_dry_stages.length === 0 ||
+    required_dry_stages.every(([, data]) => data.status === 'OK');
+  const wet_passes =
+    required_wet_stages.length === 0 ||
+    required_wet_stages.every(([, data]) => data.status === 'OK');
+
   const result = dry_passes && wet_passes ? 'PASS' : 'FAIL';
 
   return {

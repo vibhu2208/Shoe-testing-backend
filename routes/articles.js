@@ -8,7 +8,21 @@ const XLSX = require('xlsx');
 const { buildCoaDocBuffer } = require('../services/coaReportGenerator');
 const { pool } = require('../config/database');
 const { advanceAfterPeriodicSubmit } = require('../services/periodicService');
+const {
+  getDefaultTesterId,
+  getExplicitTesterId,
+  shouldAssignDefaultTester,
+  resolveAssignedTester,
+  assignmentMeta
+} = require('../services/defaultTester');
 const upload = multer({ storage: multer.memoryStorage() });
+
+const resolveTestAssignment = (test, defaultTesterId) => {
+  const executionType = test.executionType || test.execution_type;
+  const explicit = getExplicitTesterId(test);
+  const testerId = resolveAssignedTester(explicit, defaultTesterId, executionType);
+  return assignmentMeta(testerId);
+};
 
 const normalizeCell = (value) => {
   if (value === undefined || value === null) return '';
@@ -75,8 +89,10 @@ const createArticleWithTests = async ({
       `, [newArticle.id, batchNumber, 'Initial test batch']);
 
       const batchId = batchResult.rows[0].id;
+      const defaultTesterId = await getDefaultTesterId(client);
 
       for (const test of tests) {
+        const meta = resolveTestAssignment(test, defaultTesterId);
         await client.query(`
           INSERT INTO article_tests (
             article_id, batch_id, test_name, test_standard, client_requirement,
@@ -99,12 +115,12 @@ const createArticleWithTests = async ({
           test.vendorContact || test.vendor_contact,
           test.vendorEmail || test.vendor_email,
           test.expectedReportDate || test.expected_report_date,
-          test.assignedTesterId || test.assigned_tester_id || null,
+          meta.assigned_tester_id,
           test.testDeadline || test.test_deadline || null,
-          test.assignedTesterId || test.assigned_tester_id ? new Date() : null,
-          test.assignedTesterId || test.assigned_tester_id ? 1 : null,
+          meta.assigned_at,
+          meta.assigned_by,
           test.notes || null,
-          test.assignedTesterId || test.assigned_tester_id ? 'assigned' : 'pending'
+          meta.status
         ]);
       }
     }
@@ -271,8 +287,10 @@ router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), as
             VALUES ($1, $2, $3, 'active') RETURNING id
           `, [newArticle.id, batchNumber, 'Bulk upload initial test batch']);
           const batchId = batchResult.rows[0].id;
+          const defaultTesterId = await getDefaultTesterId(client);
 
           for (const test of article.tests) {
+            const meta = resolveTestAssignment(test, defaultTesterId);
             await client.query(`
               INSERT INTO article_tests (
                 article_id, batch_id, test_name, test_standard, client_requirement,
@@ -295,12 +313,12 @@ router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), as
               test.vendorContact,
               test.vendorEmail,
               test.expectedReportDate,
-              null,
+              meta.assigned_tester_id,
               test.testDeadline,
-              null,
-              null,
+              meta.assigned_at,
+              meta.assigned_by,
               test.notes,
-              'pending'
+              meta.status
             ]);
           }
         }
@@ -537,19 +555,28 @@ router.post('/articles/:id/batches', async (req, res) => {
       
       // Add tests to batch if provided
       if (tests && tests.length > 0) {
+        const defaultTesterId = await getDefaultTesterId(client);
         for (const test of tests) {
+          const meta = resolveTestAssignment(test, defaultTesterId);
           await client.query(`
             INSERT INTO article_tests (
               article_id, batch_id, test_name, test_standard, client_requirement,
               category, execution_type, inhouse_test_id, vendor_name, vendor_contact,
-              vendor_email, expected_report_date, notes, status
+              vendor_email, expected_report_date, assigned_tester_id, test_deadline,
+              assigned_at, assigned_by, notes, status
             ) VALUES (
-              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'pending'
+              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
             )
           `, [
             id, newBatch.id, test.testName, test.standard, test.clientRequirement,
             test.category, test.executionType, test.inhouseTestId, test.vendorName,
-            test.vendorContact, test.vendorEmail, test.expectedReportDate, test.notes
+            test.vendorContact, test.vendorEmail, test.expectedReportDate,
+            meta.assigned_tester_id,
+            test.testDeadline || test.test_deadline || null,
+            meta.assigned_at,
+            meta.assigned_by,
+            test.notes,
+            meta.status
           ]);
         }
       }

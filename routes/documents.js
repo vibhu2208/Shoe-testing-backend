@@ -28,12 +28,11 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024 // 10MB limit
   },
   fileFilter: function (req, file, cb) {
-    // Allow PDF and JPEG/JPG files for Reducto parsing
-    const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/jpg'];
-    if (allowedMimeTypes.includes(file.mimetype)) {
+    // Only allow PDF files
+    if (file.mimetype === 'application/pdf') {
       cb(null, true);
     } else {
-      cb(new Error('Only PDF and JPEG/JPG files are allowed'), false);
+      cb(new Error('Only PDF files are allowed'), false);
     }
   }
 });
@@ -42,6 +41,20 @@ const isValidUuid = (value) => (
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 );
+
+/** null = standalone upload; string = linked client; { error } = invalid */
+const resolveUploadClientId = (clientId) => {
+  if (!clientId || clientId === 'null' || clientId === 'undefined') {
+    return null;
+  }
+  if (clientId === 'temp-client-id') {
+    return { error: 'A valid clientId (UUID) is required' };
+  }
+  if (!isValidUuid(clientId)) {
+    return { error: 'A valid clientId (UUID) is required' };
+  }
+  return clientId;
+};
 
 /**
  * POST /api/documents/upload
@@ -58,10 +71,11 @@ router.post('/upload', async (req, res) => {
       });
     }
 
-    if (!clientId || clientId === 'temp-client-id' || !isValidUuid(clientId)) {
+    const resolvedClientId = resolveUploadClientId(clientId);
+    if (resolvedClientId && typeof resolvedClientId === 'object' && resolvedClientId.error) {
       return res.status(400).json({
         success: false,
-        error: 'A valid clientId (UUID) is required'
+        error: resolvedClientId.error
       });
     }
     
@@ -72,7 +86,7 @@ router.post('/upload', async (req, res) => {
         extraction_status, uploaded_at
       ) VALUES ($1, $2, $3, $4, 'pending', NOW()) RETURNING id
     `, [
-      clientId,
+      resolvedClientId,
       fileName,
       filePath,
       mimeType || 'application/pdf'
@@ -114,15 +128,16 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
     }
 
     const { fileName, clientId } = req.body;
+    const resolvedClientId = resolveUploadClientId(clientId);
 
-    if (!clientId || clientId === 'temp-client-id' || !isValidUuid(clientId)) {
+    if (resolvedClientId && typeof resolvedClientId === 'object' && resolvedClientId.error) {
       if (req.file && fs.existsSync(req.file.path)) {
         fs.unlinkSync(req.file.path);
       }
 
       return res.status(400).json({
         success: false,
-        error: 'A valid clientId (UUID) is required'
+        error: resolvedClientId.error
       });
     }
     
@@ -133,7 +148,7 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
         extraction_status, uploaded_at
       ) VALUES ($1, $2, $3, $4, 'pending', NOW()) RETURNING id
     `, [
-      clientId,
+      resolvedClientId,
       fileName || req.file.originalname,
       req.file.path,
       req.file.mimetype

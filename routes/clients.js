@@ -33,7 +33,7 @@ router.get('/users', async (req, res) => {
     // Use direct pool connection to avoid adapter issues
     const { pool } = require('../config/database');
     
-    let query = 'SELECT id, name, department, role, is_active FROM users WHERE 1=1';
+    let query = 'SELECT id, name, email, department, role, is_active FROM users WHERE 1=1';
     const params = [];
     
     if (role) {
