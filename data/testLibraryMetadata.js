@@ -87,19 +87,21 @@ const TEST_LIBRARY_METADATA = {
 
   'PH-001': {
     input_parameters: {
-      beaker_1_ph: param('number', 0, 'pH reading — beaker 1'),
-      beaker_2_ph: param('number', 0, 'pH reading — beaker 2'),
-      client_spec_min_avg_ph: param('number', 6, 'Client minimum average pH'),
-      client_spec_max_difference: param('number', 0.5, 'Maximum allowed difference between beakers')
+      beaker_1_ph_1: param('number', 0, 'pH reading 1 — beaker 1'),
+      beaker_1_ph_2: param('number', 0, 'pH reading 2 — beaker 1'),
+      beaker_2_ph_1: param('number', 0, 'pH reading 1 — beaker 2'),
+      beaker_2_ph_2: param('number', 0, 'pH reading 2 — beaker 2'),
+      client_spec_min_avg_ph: param('number', 6, 'Client minimum average pH per beaker'),
+      client_spec_max_difference: param('number', 0.5, 'Maximum allowed difference between the two readings in each beaker')
     },
     calculation_steps: [
-      { step: 1, formula: 'average_pH = (beaker_1_ph + beaker_2_ph) / 2', description: 'Average of two beaker readings.' },
-      { step: 2, formula: 'difference = |beaker_1_ph − beaker_2_ph|', description: 'Absolute difference between beakers.' },
-      { step: 3, formula: 'PASS if average ≥ min AND difference ≤ max', description: 'Both client limits must be satisfied.' }
+      { step: 1, formula: 'beaker_avg = (reading_1 + reading_2) / 2', description: 'Average pH for each beaker from its two readings.' },
+      { step: 2, formula: 'beaker_diff = |reading_1 − reading_2|', description: 'Difference between the two readings in each beaker.' },
+      { step: 3, formula: 'PASS if each beaker avg ≥ min AND each beaker diff ≤ max', description: 'Both beakers must satisfy client limits.' }
     ],
     pass_fail_logic: {
-      pass_condition: 'Average pH meets minimum and beaker difference is within client limit.',
-      fail_condition: 'Average pH too low or beaker readings differ too much.',
+      pass_condition: 'Each beaker average meets minimum pH and each beaker reading pair is within the max difference.',
+      fail_condition: 'Any beaker average too low or any beaker reading pair differs too much.',
       notes: 'Client pH limits are set per order.'
     }
   },

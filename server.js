@@ -19,6 +19,10 @@ const extractionRoutes = require('./routes/extraction');
 const documentRoutes = require('./routes/documents');
 const testerRoutes = require('./routes/tester');
 const periodicRoutes = require('./routes/periodic');
+const adminMaintenanceRoutes = require('./routes/adminMaintenance');
+const dashboardExportRoutes = require('./routes/dashboardExport');
+const reportTemplateRoutes = require('./routes/reportTemplates');
+const { seedTemplatesFromFolders } = require('./services/reportTemplateService');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -56,6 +60,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 app.use('/reports', express.static(path.join(__dirname, 'reports')));
+app.use('/backups', express.static(path.join(__dirname, 'backups')));
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -589,6 +594,11 @@ if (process.env.NODE_ENV === 'production') {
   console.log('🔓 Periodic routes mounted without authentication (development mode)');
 }
 
+// Admin maintenance endpoints (always protected)
+app.use('/api/admin/maintenance', adminMaintenanceRoutes);
+app.use('/api/admin/dashboard', dashboardExportRoutes);
+app.use('/api/reports', reportTemplateRoutes);
+
 // Initialize database
 const initDatabase = async () => {
   try {
@@ -598,6 +608,13 @@ const initDatabase = async () => {
     const isConnected = await dbAdapter.testConnection();
     if (!isConnected) {
       throw new Error('Failed to connect to PostgreSQL database');
+    }
+
+    if (process.env.SEED_REPORT_TEMPLATES === 'true') {
+      const seedResult = await seedTemplatesFromFolders();
+      console.log(`Template scan completed: ${seedResult.seededCount} seeded, ${seedResult.totalActive} active templates`);
+    } else {
+      console.log('Report template auto-seed skipped (set SEED_REPORT_TEMPLATES=true to enable)');
     }
 
     console.log('Database initialization completed successfully');

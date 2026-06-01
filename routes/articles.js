@@ -6,6 +6,7 @@ const fs = require('fs/promises');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const { buildCoaDocBuffer } = require('../services/coaReportGenerator');
+const { generateReportFromTemplate } = require('../services/docxReportGenerator');
 const { pool } = require('../config/database');
 const { advanceAfterPeriodicSubmit } = require('../services/periodicService');
 const {
@@ -941,7 +942,7 @@ async function generateAndPersistReport({ testId, forceRegenerate = false }) {
 
 router.post('/article-tests/:testId/generate-report', async (req, res) => {
   try {
-    const result = await generateAndPersistReport({ testId: req.params.testId, forceRegenerate: false });
+    const result = await generateReportFromTemplate({ testId: req.params.testId });
     res.json(result);
   } catch (error) {
     console.error('Generate report error:', error);
@@ -951,7 +952,7 @@ router.post('/article-tests/:testId/generate-report', async (req, res) => {
 
 router.post('/article-tests/:testId/regenerate-report', async (req, res) => {
   try {
-    const result = await generateAndPersistReport({ testId: req.params.testId, forceRegenerate: true });
+    const result = await generateReportFromTemplate({ testId: req.params.testId });
     res.json(result);
   } catch (error) {
     console.error('Regenerate report error:', error);

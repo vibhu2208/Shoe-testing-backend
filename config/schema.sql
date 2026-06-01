@@ -258,3 +258,43 @@ CREATE TABLE IF NOT EXISTS retest_requests (
   FOREIGN KEY (report_id) REFERENCES reports(id),
   FOREIGN KEY (requested_by) REFERENCES users(id)
 );
+
+-- Dynamic report template mapping for test library
+ALTER TABLE tests
+  ADD COLUMN IF NOT EXISTS template_name VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS template_path TEXT,
+  ADD COLUMN IF NOT EXISTS template_key VARCHAR(255);
+
+-- Track which template was used for each executed test report
+ALTER TABLE article_tests
+  ADD COLUMN IF NOT EXISTS template_key VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS template_name VARCHAR(255),
+  ADD COLUMN IF NOT EXISTS generated_report_id UUID;
+
+-- Catalog all available report templates
+CREATE TABLE IF NOT EXISTS report_templates (
+  id SERIAL PRIMARY KEY,
+  template_key VARCHAR(255) UNIQUE NOT NULL,
+  template_name VARCHAR(255) NOT NULL,
+  template_path TEXT NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  source VARCHAR(50) DEFAULT 'system',
+  is_active BOOLEAN DEFAULT true,
+  version INTEGER DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Generated report history
+CREATE TABLE IF NOT EXISTS generated_reports (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  article_test_id UUID,
+  test_id VARCHAR(100),
+  template_key VARCHAR(255),
+  template_name VARCHAR(255),
+  template_version INTEGER,
+  report_url TEXT NOT NULL,
+  report_status VARCHAR(30) DEFAULT 'generated',
+  generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  metadata JSONB
+);

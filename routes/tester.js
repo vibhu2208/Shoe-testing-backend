@@ -69,6 +69,10 @@ router.get('/my-tests', async (req, res) => {
         at.test_deadline,
         at.assigned_at,
         at.notes as admin_notes,
+        at.report_url,
+        at.report_generated_at,
+        at.template_key,
+        at.template_name,
         at.is_periodic,
         at.periodic_schedule_id,
         at.periodic_run_number,
@@ -84,12 +88,15 @@ router.get('/my-tests', async (req, res) => {
         a.article_number,
         a.material_type,
         a.color,
-        a.description
+        a.description,
+        c.company_name as client_name,
+        c.client_code
         
         -- NO client details excluded
 
       FROM article_tests at
       JOIN articles a ON at.article_id = a.id
+      LEFT JOIN clients c ON a.client_id = c.id
       LEFT JOIN periodic_schedules ps ON ps.id = at.periodic_schedule_id
       LEFT JOIN periodic_test_runs ptr ON ptr.article_test_id = at.id
         AND ptr.schedule_id = ps.id
@@ -213,6 +220,10 @@ router.get('/my-tests/:orderTestId', async (req, res) => {
         at.result,
         at.result_data,
         at.submitted_at,
+        at.report_url,
+        at.report_generated_at,
+        at.template_key,
+        at.template_name,
         at.is_periodic,
         at.periodic_schedule_id,
         at.periodic_run_number,
@@ -229,10 +240,13 @@ router.get('/my-tests/:orderTestId', async (req, res) => {
         a.article_number,
         a.material_type,
         a.color,
-        a.description
+        a.description,
+        c.company_name as client_name,
+        c.client_code
 
       FROM article_tests at
       JOIN articles a ON at.article_id = a.id
+      LEFT JOIN clients c ON a.client_id = c.id
       LEFT JOIN periodic_schedules ps ON ps.id = at.periodic_schedule_id
       LEFT JOIN periodic_test_runs ptr ON ptr.article_test_id = at.id
         AND ptr.schedule_id = ps.id

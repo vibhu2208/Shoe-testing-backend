@@ -140,6 +140,40 @@ router.put('/:id/category', async (req, res) => {
   }
 });
 
+// PUT /api/tests/:id/template - Update template mapping (admin only)
+router.put('/:id/template', async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+
+  try {
+    const { id } = req.params;
+    const { templateName, templatePath, templateKey } = req.body || {};
+
+    if (!templateKey && !templateName) {
+      return res.status(400).json({ error: 'templateKey or templateName is required' });
+    }
+
+    const result = await dbAdapter.execute(
+      `UPDATE tests
+       SET template_name = $1,
+           template_path = $2,
+           template_key = $3
+       WHERE id = $4`,
+      [templateName || null, templatePath || null, templateKey || null, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Test not found' });
+    }
+
+    res.json({ message: 'Template mapping updated successfully' });
+  } catch (error) {
+    console.error('Update test template mapping error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 // POST /api/tests/:id/calculate - Perform test calculation
 router.post('/:id/calculate', async (req, res) => {
   try {
@@ -363,21 +397,70 @@ function calculateBondStrength(inputData, clientSpecs) {
   };
 }
 
+function roundPhValue(value) {
+  return Math.round(Number(value) * 100) / 100;
+}
+
+function beakerPhStats(reading1, reading2) {
+  const a = Number(reading1);
+  const b = Number(reading2);
+  const average = roundPhValue((a + b) / 2);
+  const difference = roundPhValue(Math.abs(a - b));
+  return { average, difference };
+}
+
 function calculatePHValue(inputData, clientSpecs) {
-  const { beaker_1_ph, beaker_2_ph, client_spec_min_avg_ph, client_spec_max_difference } = inputData;
-  
-  const average_pH = (beaker_1_ph + beaker_2_ph) / 2;
-  const difference = Math.abs(beaker_1_ph - beaker_2_ph);
-  
-  const avg_ph_passes = Number(average_pH) >= Number(client_spec_min_avg_ph);
-  const difference_passes = Number(difference) <= Number(client_spec_max_difference);
-  const result = avg_ph_passes && difference_passes ? 'PASS' : 'FAIL';
+  const {
+    beaker_1_ph_1,
+    beaker_1_ph_2,
+    beaker_2_ph_1,
+    beaker_2_ph_2,
+    client_spec_min_avg_ph,
+    client_spec_max_difference
+  } = inputData;
+
+  const minAvgPh = Number(client_spec_min_avg_ph ?? clientSpecs?.client_spec_min_avg_ph);
+  const maxDifference = Number(client_spec_max_difference ?? clientSpecs?.client_spec_max_difference);
+
+  const readings = [beaker_1_ph_1, beaker_1_ph_2, beaker_2_ph_1, beaker_2_ph_2];
+  if (readings.some((value) => value == null || value === '' || Number.isNaN(Number(value)))) {
+    throw new Error('Enter two pH readings for each beaker.');
+  }
+
+  const beaker1 = beakerPhStats(beaker_1_ph_1, beaker_1_ph_2);
+  const beaker2 = beakerPhStats(beaker_2_ph_1, beaker_2_ph_2);
+
+  const beaker_1_avg_passes = beaker1.average >= minAvgPh;
+  const beaker_1_difference_passes = beaker1.difference <= maxDifference;
+  const beaker_2_avg_passes = beaker2.average >= minAvgPh;
+  const beaker_2_difference_passes = beaker2.difference <= maxDifference;
+
+  const average_pH = roundPhValue((beaker1.average + beaker2.average) / 2);
+  const difference = roundPhValue(Math.max(beaker1.difference, beaker2.difference));
+
+  const result =
+    beaker_1_avg_passes &&
+    beaker_1_difference_passes &&
+    beaker_2_avg_passes &&
+    beaker_2_difference_passes
+      ? 'PASS'
+      : 'FAIL';
 
   return {
+    beaker_1_average: beaker1.average,
+    beaker_1_difference: beaker1.difference,
+    beaker_2_average: beaker2.average,
+    beaker_2_difference: beaker2.difference,
+    beaker_1_ph: beaker1.average,
+    beaker_2_ph: beaker2.average,
     average_pH,
     difference,
-    avg_ph_passes,
-    difference_passes,
+    beaker_1_avg_passes,
+    beaker_1_difference_passes,
+    beaker_2_avg_passes,
+    beaker_2_difference_passes,
+    avg_ph_passes: beaker_1_avg_passes && beaker_2_avg_passes,
+    difference_passes: beaker_1_difference_passes && beaker_2_difference_passes,
     result
   };
 }
