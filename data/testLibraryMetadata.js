@@ -71,10 +71,10 @@ const TEST_LIBRARY_METADATA = {
   'SATRA-TM-281': {
     input_parameters: {
       client_spec_min_bond_strength: param('number', 2.5, 'Minimum bond strength (N/mm) per client spec'),
-      point_data: param('object', null, '16 measurement points: force (N) and width (mm) per point')
+      point_data: param('object', null, '16 measurement points: force (kg) and width (mm) per point')
     },
     calculation_steps: [
-      { step: 1, formula: 'bond_strength = force_applied / width (per point)', description: 'Calculate bond strength at each of 16 points.' },
+      { step: 1, formula: 'bond_strength = force_applied × 9.8 / width (per point)', description: 'Calculate bond strength at each of 16 points.' },
       { step: 2, formula: 'point_passes = bond_strength ≥ client_spec_min_bond_strength', description: 'Evaluate each point against client minimum.' },
       { step: 3, formula: 'PASS if all 16 points pass', description: 'Any failing point fails the test.' }
     ],

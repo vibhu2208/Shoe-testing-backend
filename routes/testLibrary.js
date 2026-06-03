@@ -369,7 +369,7 @@ function calculateBondStrength(inputData, clientSpecs) {
   const { client_spec_min_bond_strength, point_data } = inputData;
   
   const point_results = point_data.map(point => {
-    const bond_strength = point.force_applied / point.width;
+    const bond_strength = point.width > 0 ? (point.force_applied * 9.8 / point.width) : 0;
     const passes = Number(bond_strength) >= Number(client_spec_min_bond_strength);
     return {
       ...point,

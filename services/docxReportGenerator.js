@@ -314,7 +314,7 @@ function expandBondStrengthPlaceholders(row, resultData = {}, calculatedResults 
   const points = pointResults || (pointData || []).map((point, idx) => {
     const force = Number(point.force_applied) || 0;
     const width = Number(point.width) || 0;
-    const bondStrength = width > 0 ? force / width : 0;
+    const bondStrength = width > 0 ? (force * 9.8 / width) : 0;
     const min = Number(minSpec) || 0;
     return {
       point_number: point.point_number || idx + 1,
