@@ -4,6 +4,11 @@ const dbAdapter = require('../config/dbAdapter');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs/promises');
+const fsSync = require('fs');
+const PizZip = require('pizzip');
+const mammoth = require('mammoth');
+const { generateReportFromTemplate } = require('../services/docxReportGenerator');
+const { isEmailConfigured, isValidEmail, sendMail, escapeHtml } = require('../services/emailService');
 
 const resolveTesterId = (req) => {
   const headerTesterId = req.headers['x-user-id'];
@@ -45,6 +50,75 @@ async function ensureDir(dirPath) {
   await fs.mkdir(dirPath, { recursive: true });
 }
 
+function extractDocxPreviewText(absPath) {
+  try {
+    const buffer = fsSync.readFileSync(absPath);
+    const zip = new PizZip(buffer);
+    const xml = zip.file('word/document.xml')?.asText() || '';
+    const paragraphs = xml
+      .split(/<w:p[\s>]/)
+      .map((block) => {
+        const parts = [];
+        const re = /<w:t(?:\s[^>]*)?>([^<]*)<\/w:t>/g;
+        let match;
+        while ((match = re.exec(block)) !== null) {
+          parts.push(match[1]);
+        }
+        return parts.join('').trim();
+      })
+      .filter(Boolean);
+    return paragraphs.join('\n\n');
+  } catch {
+    return '';
+  }
+}
+
+async function extractDocxPreviewHtml(absPath) {
+  try {
+    const result = await mammoth.convertToHtml({ path: absPath });
+    return result.value || '';
+  } catch {
+    return '';
+  }
+}
+
+async function assertTesterOwnsSubmittedTest(pool, testId, testerId) {
+  const result = await pool.query(
+    `SELECT
+      at.id,
+      at.status,
+      at.test_name,
+      at.test_standard,
+      at.client_requirement,
+      at.category,
+      at.result,
+      at.submitted_at,
+      at.report_url,
+      at.report_number,
+      at.report_generated_at,
+      at.template_key,
+      at.template_name,
+      a.article_name,
+      a.article_number,
+      c.company_name AS client_name,
+      cc.email AS client_contact_email,
+      cc.name AS client_contact_name
+    FROM article_tests at
+    JOIN articles a ON a.id = at.article_id
+    LEFT JOIN clients c ON c.id = a.client_id
+    LEFT JOIN client_contacts cc ON cc.client_id = c.id AND cc.is_primary = true
+    WHERE at.id = $1 AND at.assigned_tester_id = $2`,
+    [testId, testerId]
+  );
+  if (!result.rows.length) {
+    return { error: 'Test not found or not assigned to you', status: 404 };
+  }
+  if (result.rows[0].status !== 'submitted') {
+    return { error: 'Report actions are only available for completed (submitted) tests', status: 400 };
+  }
+  return { row: result.rows[0] };
+}
+
 // Get tester's assigned tests
 router.get('/my-tests', async (req, res) => {
   try {
@@ -70,6 +144,7 @@ router.get('/my-tests', async (req, res) => {
         at.assigned_at,
         at.notes as admin_notes,
         at.report_url,
+        at.report_number,
         at.report_generated_at,
         at.template_key,
         at.template_name,
@@ -161,6 +236,154 @@ router.get('/periodic-schedules/:scheduleId/runs', async (req, res) => {
   }
 });
 
+/** Generate CoA for a completed test assigned to this tester. */
+router.post('/my-tests/:orderTestId/generate-report', async (req, res) => {
+  try {
+    const testerId = resolveTesterId(req);
+    if (!testerId) {
+      return res.status(400).json({ error: 'Valid tester ID is required' });
+    }
+    const { orderTestId } = req.params;
+    const { pool } = require('../config/database');
+    const ownership = await assertTesterOwnsSubmittedTest(pool, orderTestId, testerId);
+    if (ownership.error) {
+      return res.status(ownership.status).json({ error: ownership.error });
+    }
+    const generated = await generateReportFromTemplate({ testId: orderTestId });
+    res.json(generated);
+  } catch (error) {
+    console.error('Tester generate report error:', error);
+    res.status(400).json({ error: error.message || 'Failed to generate report' });
+  }
+});
+
+/** Preview report metadata and document text for a completed test. */
+router.get('/my-tests/:orderTestId/preview-report', async (req, res) => {
+  try {
+    const testerId = resolveTesterId(req);
+    if (!testerId) {
+      return res.status(400).json({ error: 'Valid tester ID is required' });
+    }
+    const { orderTestId } = req.params;
+    const { pool } = require('../config/database');
+    const ownership = await assertTesterOwnsSubmittedTest(pool, orderTestId, testerId);
+    if (ownership.error) {
+      return res.status(ownership.status).json({ error: ownership.error });
+    }
+    const row = ownership.row;
+    if (!row.report_url) {
+      return res.status(404).json({ error: 'No report generated yet. Generate a report first.' });
+    }
+    const absPath = path.resolve(__dirname, '..', String(row.report_url).replace(/^\//, ''));
+    await fs.access(absPath);
+    const [documentPreview, documentHtml] = await Promise.all([
+      Promise.resolve(extractDocxPreviewText(absPath)),
+      extractDocxPreviewHtml(absPath),
+    ]);
+    res.json({
+      testId: row.id,
+      testName: row.test_name,
+      testStandard: row.test_standard,
+      clientRequirement: row.client_requirement,
+      category: row.category,
+      result: row.result,
+      submittedAt: row.submitted_at,
+      reportNumber: row.report_number,
+      reportGeneratedAt: row.report_generated_at,
+      templateKey: row.template_key,
+      templateName: row.template_name,
+      clientName: row.client_name,
+      clientContactEmail: row.client_contact_email || null,
+      clientContactName: row.client_contact_name || null,
+      articleName: row.article_name,
+      articleNumber: row.article_number,
+      documentPreview,
+      documentHtml,
+    });
+  } catch (error) {
+    console.error('Tester preview report error:', error);
+    res.status(500).json({ error: 'Failed to load report preview' });
+  }
+});
+
+/** Email report DOCX to a recipient (tester-owned submitted tests). */
+router.post('/my-tests/:orderTestId/send-report-email', async (req, res) => {
+  try {
+    const testerId = resolveTesterId(req);
+    if (!testerId) {
+      return res.status(400).json({ error: 'Valid tester ID is required' });
+    }
+    if (!isEmailConfigured()) {
+      return res.status(503).json({ error: 'Email service is not configured on the server' });
+    }
+
+    const { toEmail, message } = req.body || {};
+    const recipient = String(toEmail || '').trim().toLowerCase();
+    if (!isValidEmail(recipient)) {
+      return res.status(400).json({ error: 'A valid recipient email is required' });
+    }
+
+    const { orderTestId } = req.params;
+    const { pool } = require('../config/database');
+    const ownership = await assertTesterOwnsSubmittedTest(pool, orderTestId, testerId);
+    if (ownership.error) {
+      return res.status(ownership.status).json({ error: ownership.error });
+    }
+    const row = ownership.row;
+    if (!row.report_url) {
+      return res.status(404).json({ error: 'No report generated yet. Generate a report first.' });
+    }
+
+    const absPath = path.resolve(__dirname, '..', String(row.report_url).replace(/^\//, ''));
+    await fs.access(absPath);
+    const fileName = `CoA_${String(row.report_number || row.test_name || 'report').replace(/[^a-zA-Z0-9._-]/g, '_')}.docx`;
+    const reportLabel = row.report_number || row.test_name || 'Test Report';
+    const clientLabel = row.client_name || 'Client';
+    const optionalMessage = String(message || '').trim();
+    const subject = `Test Report — ${reportLabel} — ${clientLabel}`;
+
+    const htmlBody = `
+      <div style="font-family:Arial,sans-serif;color:#111;line-height:1.5;max-width:640px;">
+        <p>Dear ${escapeHtml(row.client_contact_name || 'Client')},</p>
+        <p>Please find attached the test report for <strong>${escapeHtml(row.test_name)}</strong>
+        (${escapeHtml(row.article_number || '')} — ${escapeHtml(row.article_name || '')}).</p>
+        <table style="border-collapse:collapse;margin:16px 0;width:100%;">
+          <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Report number</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(reportLabel)}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Result</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(row.result || '—')}</td></tr>
+          <tr><td style="padding:8px;border:1px solid #e5e7eb;"><strong>Standard</strong></td><td style="padding:8px;border:1px solid #e5e7eb;">${escapeHtml(row.test_standard || '—')}</td></tr>
+        </table>
+        ${optionalMessage ? `<p style="margin-top:16px;">${escapeHtml(optionalMessage).replace(/\n/g, '<br/>')}</p>` : ''}
+        <p style="margin-top:24px;color:#555;font-size:13px;">Sent from Virola LIMS</p>
+      </div>`;
+
+    const textBody = [
+      `Dear ${row.client_contact_name || 'Client'},`,
+      '',
+      `Attached: test report for ${row.test_name} (${row.article_number} — ${row.article_name}).`,
+      `Report number: ${reportLabel}`,
+      `Result: ${row.result || '—'}`,
+      optionalMessage ? `\n${optionalMessage}` : '',
+      '',
+      'Sent from Virola LIMS',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    await sendMail({
+      to: recipient,
+      subject,
+      html: htmlBody,
+      text: textBody,
+      attachments: [{ filename: fileName, path: absPath }],
+    });
+
+    res.json({ message: 'Report emailed successfully', sentTo: recipient });
+  } catch (error) {
+    console.error('Tester send report email error:', error);
+    res.status(500).json({ error: error.message || 'Failed to send report email' });
+  }
+});
+
 /** Download CoA for a test assignment the tester owns (any run / historical). */
 router.get('/my-tests/:orderTestId/download-report', async (req, res) => {
   try {
@@ -221,6 +444,7 @@ router.get('/my-tests/:orderTestId', async (req, res) => {
         at.result_data,
         at.submitted_at,
         at.report_url,
+        at.report_number,
         at.report_generated_at,
         at.template_key,
         at.template_name,
