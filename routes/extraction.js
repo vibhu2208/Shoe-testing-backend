@@ -1,5 +1,7 @@
 const express = require('express');
 const router = express.Router();
+const path = require('path');
+const fs = require('fs');
 const { fullExtractionPipeline, getExtractionStatus, retryExtraction } = require('../services/extractionPipeline');
 const dbAdapter = require('../config/dbAdapter');
 
@@ -39,8 +41,41 @@ router.post('/start', async (req, res) => {
       });
     }
 
+    // Resolve absolute disk path if client sent a public /uploads URL
+    let resolvedPath = filePath;
+    if (typeof filePath === 'string' && !path.isAbsolute(filePath)) {
+      const uploadsRoot = path.join(__dirname, '../uploads');
+      const relative = filePath.replace(/^\/?uploads\//i, '');
+      const candidate = path.join(uploadsRoot, relative);
+      if (fs.existsSync(candidate)) {
+        resolvedPath = candidate;
+      }
+    }
+
+    // Also try looking up stored file_url from DB
+    if (!path.isAbsolute(resolvedPath) || !fs.existsSync(resolvedPath)) {
+      const withUrl = await dbAdapter.query(
+        'SELECT file_url FROM client_documents WHERE id = $1',
+        [clientDocumentId]
+      );
+      if (withUrl[0]?.file_url) {
+        const stored = withUrl[0].file_url;
+        if (path.isAbsolute(stored) && fs.existsSync(stored)) {
+          resolvedPath = stored;
+        } else {
+          const relative = String(stored).replace(/\\/g, '/').replace(/^\/?uploads\//i, '');
+          const candidate = path.join(__dirname, '../uploads', relative);
+          if (fs.existsSync(candidate)) resolvedPath = candidate;
+          else {
+            const byName = path.join(__dirname, '../uploads/documents', path.basename(stored));
+            if (fs.existsSync(byName)) resolvedPath = byName;
+          }
+        }
+      }
+    }
+
     // Run extraction pipeline (async for large files)
-    const result = await fullExtractionPipeline(filePath, clientDocumentId);
+    const result = await fullExtractionPipeline(resolvedPath, clientDocumentId);
 
     if (result.success) {
       return res.json({

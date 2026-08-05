@@ -42,6 +42,52 @@ const isValidUuid = (value) => (
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 );
 
+const UPLOADS_ROOT = path.join(__dirname, '../uploads');
+
+/** Convert absolute disk paths / backslashes into a public /uploads/... URL. */
+function toPublicUploadUrl(storedPath) {
+  if (!storedPath || typeof storedPath !== 'string') return null;
+  const normalized = storedPath.replace(/\\/g, '/');
+
+  if (normalized.startsWith('/uploads/')) return normalized;
+  if (normalized.startsWith('uploads/')) return `/${normalized}`;
+
+  const marker = '/uploads/';
+  const idx = normalized.toLowerCase().lastIndexOf(marker);
+  if (idx !== -1) {
+    return normalized.slice(idx);
+  }
+
+  // Bare filename fallback
+  const base = path.basename(normalized);
+  if (base && base.includes('.')) {
+    return `/uploads/documents/${base}`;
+  }
+  return null;
+}
+
+/** Resolve a stored file_url (absolute or /uploads/...) to a local disk path. */
+function resolveLocalFilePath(storedPath) {
+  if (!storedPath || typeof storedPath !== 'string') return null;
+
+  if (path.isAbsolute(storedPath) && fs.existsSync(storedPath)) {
+    return storedPath;
+  }
+
+  const publicUrl = toPublicUploadUrl(storedPath);
+  if (publicUrl) {
+    const relative = publicUrl.replace(/^\/uploads\//i, '');
+    const candidate = path.join(UPLOADS_ROOT, relative);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Try basename under documents/
+  const byName = path.join(UPLOADS_ROOT, 'documents', path.basename(storedPath));
+  if (fs.existsSync(byName)) return byName;
+
+  return null;
+}
+
 /** null = standalone upload; string = linked client; { error } = invalid */
 const resolveUploadClientId = (clientId) => {
   if (!clientId || clientId === 'null' || clientId === 'undefined') {
@@ -78,6 +124,8 @@ router.post('/upload', async (req, res) => {
         error: resolvedClientId.error
       });
     }
+
+    const storedUrl = toPublicUploadUrl(filePath) || filePath;
     
     // Create document record in database
     const result = await dbAdapter.execute(`
@@ -88,7 +136,7 @@ router.post('/upload', async (req, res) => {
     `, [
       resolvedClientId,
       fileName,
-      filePath,
+      storedUrl,
       mimeType || 'application/pdf'
     ]);
 
@@ -97,7 +145,7 @@ router.post('/upload', async (req, res) => {
     res.json({
       success: true,
       documentId: documentId,
-      filePath: filePath,
+      filePath: storedUrl,
       fileName: fileName,
       fileSize: fileSize,
       message: 'Document record created successfully'
@@ -141,6 +189,8 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
       });
     }
     
+    const publicUrl = toPublicUploadUrl(req.file.path) || `/uploads/documents/${req.file.filename}`;
+
     // Create document record in database
     const result = await dbAdapter.execute(`
       INSERT INTO client_documents (
@@ -150,7 +200,7 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
     `, [
       resolvedClientId,
       fileName || req.file.originalname,
-      req.file.path,
+      publicUrl,
       req.file.mimetype
     ]);
 
@@ -159,8 +209,10 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
     res.json({
       success: true,
       documentId: documentId,
+      // Absolute path for Reducto extraction; public URL for browser viewing
       filePath: req.file.path,
-      fileName: req.file.originalname,
+      fileUrl: publicUrl,
+      fileName: fileName || req.file.originalname,
       fileSize: req.file.size,
       message: 'Document uploaded successfully'
     });
@@ -182,52 +234,9 @@ router.post('/upload-file', upload.single('file'), async (req, res) => {
 });
 
 /**
- * GET /api/documents/:documentId
- * Get document details
- */
-router.get('/:documentId', async (req, res) => {
-  try {
-    const { documentId } = req.params;
-
-    const documents = await dbAdapter.query(
-      'SELECT * FROM client_documents WHERE id = $1',
-      [documentId]
-    );
-
-    if (documents.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: 'Document not found'
-      });
-    }
-
-    const document = documents[0];
-    
-    res.json({
-      success: true,
-      document: {
-        id: document.id,
-        fileName: document.file_name,
-        fileSize: document.file_size,
-        fileType: document.file_type,
-        extractionStatus: document.extraction_status,
-        extractedData: document.extracted_data ? JSON.parse(document.extracted_data) : null,
-        uploadedAt: document.uploaded_at
-      }
-    });
-
-  } catch (error) {
-    console.error('Get document error:', error);
-    res.status(500).json({
-      success: false,
-      error: 'Failed to get document'
-    });
-  }
-});
-
-/**
  * GET /api/documents/spec-library
  * Browsable catalog of uploaded PDFs / extracted specs
+ * Must be registered before /:documentId so "spec-library" is not treated as an id.
  */
 router.get('/spec-library', async (req, res) => {
   try {
@@ -260,7 +269,8 @@ router.get('/spec-library', async (req, res) => {
         clientName: d.client_name,
         clientCode: d.client_code,
         fileName: d.file_name,
-        fileUrl: d.file_url,
+        fileUrl: toPublicUploadUrl(d.file_url) || d.file_url,
+        viewUrl: `/api/documents/${d.id}/file`,
         fileType: d.file_type,
         uploadedAt: d.uploaded_at,
         extractionStatus: d.extraction_status,
@@ -273,6 +283,94 @@ router.get('/spec-library', async (req, res) => {
   } catch (error) {
     console.error('Spec library list error:', error);
     res.status(500).json({ error: 'Failed to load spec library' });
+  }
+});
+
+/**
+ * GET /api/documents/:documentId/file
+ * Stream the stored PDF (handles absolute disk paths and /uploads/... URLs).
+ */
+router.get('/:documentId/file', async (req, res) => {
+  try {
+    const documents = await dbAdapter.query(
+      'SELECT file_name, file_url, file_type FROM client_documents WHERE id = $1',
+      [req.params.documentId]
+    );
+
+    if (!documents.length) {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+
+    const doc = documents[0];
+    const localPath = resolveLocalFilePath(doc.file_url);
+    if (!localPath) {
+      return res.status(404).json({
+        error: 'File not found on server',
+        hint: 'The document record exists but the PDF file is missing from uploads.',
+      });
+    }
+
+    res.setHeader('Content-Type', doc.file_type || 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `inline; filename="${String(doc.file_name || 'document.pdf').replace(/"/g, '')}"`
+    );
+    fs.createReadStream(localPath).pipe(res);
+  } catch (error) {
+    console.error('Serve document file error:', error);
+    res.status(500).json({ error: 'Failed to open document' });
+  }
+});
+
+/**
+ * GET /api/documents/:documentId
+ * Get document details
+ */
+router.get('/:documentId', async (req, res) => {
+  try {
+    const { documentId } = req.params;
+
+    const documents = await dbAdapter.query(
+      'SELECT * FROM client_documents WHERE id = $1',
+      [documentId]
+    );
+
+    if (documents.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Document not found'
+      });
+    }
+
+    const document = documents[0];
+    let extractedData = document.extracted_data;
+    if (typeof extractedData === 'string') {
+      try {
+        extractedData = JSON.parse(extractedData);
+      } catch {
+        extractedData = null;
+      }
+    }
+    
+    res.json({
+      success: true,
+      document: {
+        id: document.id,
+        fileName: document.file_name,
+        fileSize: document.file_size,
+        fileType: document.file_type,
+        extractionStatus: document.extraction_status,
+        extractedData,
+        uploadedAt: document.uploaded_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Get document error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get document'
+    });
   }
 });
 
@@ -306,8 +404,9 @@ router.delete('/:documentId', async (req, res) => {
     );
 
     // Delete physical file
-    if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
+    const localPath = resolveLocalFilePath(filePath);
+    if (localPath && fs.existsSync(localPath)) {
+      fs.unlinkSync(localPath);
     }
 
     res.json({
