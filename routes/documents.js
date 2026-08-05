@@ -226,6 +226,57 @@ router.get('/:documentId', async (req, res) => {
 });
 
 /**
+ * GET /api/documents/spec-library
+ * Browsable catalog of uploaded PDFs / extracted specs
+ */
+router.get('/spec-library', async (req, res) => {
+  try {
+    const { clientId, search } = req.query;
+    let query = `
+      SELECT
+        d.id, d.client_id, d.file_name, d.file_url, d.file_type,
+        d.uploaded_at, d.extracted_data, d.extraction_status,
+        c.company_name AS client_name, c.client_code
+      FROM client_documents d
+      LEFT JOIN clients c ON c.id = d.client_id
+      WHERE 1=1
+    `;
+    const params = [];
+    if (clientId) {
+      params.push(clientId);
+      query += ` AND d.client_id = $${params.length}`;
+    }
+    if (search) {
+      params.push(`%${search}%`);
+      query += ` AND (d.file_name ILIKE $${params.length} OR c.company_name ILIKE $${params.length})`;
+    }
+    query += ' ORDER BY d.uploaded_at DESC LIMIT 200';
+
+    const rows = await dbAdapter.query(query, params);
+    res.json({
+      documents: rows.map((d) => ({
+        id: d.id,
+        clientId: d.client_id,
+        clientName: d.client_name,
+        clientCode: d.client_code,
+        fileName: d.file_name,
+        fileUrl: d.file_url,
+        fileType: d.file_type,
+        uploadedAt: d.uploaded_at,
+        extractionStatus: d.extraction_status,
+        extractedData:
+          typeof d.extracted_data === 'string'
+            ? JSON.parse(d.extracted_data || 'null')
+            : d.extracted_data,
+      })),
+    });
+  } catch (error) {
+    console.error('Spec library list error:', error);
+    res.status(500).json({ error: 'Failed to load spec library' });
+  }
+});
+
+/**
  * DELETE /api/documents/:documentId
  * Delete document and file
  */

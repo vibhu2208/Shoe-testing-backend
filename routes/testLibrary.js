@@ -1,7 +1,13 @@
 const express = require('express');
+const multer = require('multer');
 const dbAdapter = require('../config/dbAdapter');
 const { enrichTestRecord } = require('../data/testLibraryMetadata');
+const {
+  buildClientTestRequirementsTemplateBuffer,
+  parseClientTestRequirements
+} = require('../services/articleBulkTemplateService');
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
 function parseTestRow(row) {
   const test = {
@@ -22,6 +28,32 @@ function parseTestRow(row) {
   };
   return enrichTestRecord(test);
 }
+
+router.get('/client-requirements-template', async (req, res) => {
+  try {
+    const fileBuffer = await buildClientTestRequirementsTemplateBuffer();
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="client_test_requirements_template.xlsx"');
+    res.send(Buffer.from(fileBuffer));
+  } catch (error) {
+    console.error('Error generating client test requirements template:', error);
+    res.status(500).json({ error: 'Failed to generate client template' });
+  }
+});
+
+router.post('/parse-client-requirements', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file?.buffer) {
+      return res.status(400).json({ error: 'File is required' });
+    }
+
+    const parsed = await parseClientTestRequirements(req.file.buffer);
+    res.json(parsed);
+  } catch (error) {
+    console.error('Error parsing client test requirements:', error);
+    res.status(400).json({ error: error.message || 'Failed to parse client requirements file' });
+  }
+});
 
 // GET /api/tests - Get all tests with optional filtering
 router.get('/', async (req, res) => {
@@ -107,6 +139,130 @@ router.get('/:id', async (req, res) => {
   } catch (error) {
     console.error('Get test error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /api/tests - Create library test (admin)
+router.post('/', async (req, res) => {
+  try {
+    const {
+      id,
+      name,
+      standard,
+      category,
+      description,
+      key_tags,
+      input_parameters,
+      calculation_steps,
+      pass_fail_logic,
+    } = req.body || {};
+
+    if (!id || !name) {
+      return res.status(400).json({ error: 'id and name are required' });
+    }
+
+    const rows = await dbAdapter.query(
+      `INSERT INTO tests (
+        id, name, standard, category, description,
+        key_tags, input_parameters, calculation_steps, pass_fail_logic
+      ) VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9::jsonb)
+      RETURNING *`,
+      [
+        String(id).trim(),
+        String(name).trim(),
+        standard || null,
+        category || 'Finished Good',
+        description || null,
+        JSON.stringify(key_tags || []),
+        JSON.stringify(input_parameters || {}),
+        JSON.stringify(calculation_steps || []),
+        JSON.stringify(pass_fail_logic || {}),
+      ]
+    );
+
+    res.status(201).json({ test: parseTestRow(rows[0]) });
+  } catch (error) {
+    console.error('Create test error:', error);
+    if (String(error.message || '').includes('duplicate') || error.code === '23505') {
+      return res.status(409).json({ error: 'A test with this id already exists' });
+    }
+    res.status(500).json({ error: error.message || 'Failed to create test' });
+  }
+});
+
+// PUT /api/tests/:id - Update library test
+router.put('/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const {
+      name,
+      standard,
+      category,
+      description,
+      key_tags,
+      input_parameters,
+      calculation_steps,
+      pass_fail_logic,
+      is_active,
+    } = req.body || {};
+
+    // Ensure is_active column exists for soft-delete
+    await dbAdapter.execute(
+      `ALTER TABLE tests ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`
+    );
+
+    const rows = await dbAdapter.query(
+      `UPDATE tests SET
+        name = COALESCE($1, name),
+        standard = COALESCE($2, standard),
+        category = COALESCE($3, category),
+        description = COALESCE($4, description),
+        key_tags = COALESCE($5::jsonb, key_tags),
+        input_parameters = COALESCE($6::jsonb, input_parameters),
+        calculation_steps = COALESCE($7::jsonb, calculation_steps),
+        pass_fail_logic = COALESCE($8::jsonb, pass_fail_logic),
+        is_active = COALESCE($9, is_active)
+       WHERE id = $10
+       RETURNING *`,
+      [
+        name || null,
+        standard,
+        category,
+        description,
+        key_tags != null ? JSON.stringify(key_tags) : null,
+        input_parameters != null ? JSON.stringify(input_parameters) : null,
+        calculation_steps != null ? JSON.stringify(calculation_steps) : null,
+        pass_fail_logic != null ? JSON.stringify(pass_fail_logic) : null,
+        typeof is_active === 'boolean' ? is_active : null,
+        id,
+      ]
+    );
+
+    if (!rows.length) return res.status(404).json({ error: 'Test not found' });
+    res.json({ test: parseTestRow(rows[0]) });
+  } catch (error) {
+    console.error('Update test error:', error);
+    res.status(500).json({ error: 'Failed to update test' });
+  }
+});
+
+// DELETE /api/tests/:id - Soft-deactivate library test
+router.delete('/:id', async (req, res) => {
+  try {
+    await dbAdapter.execute(
+      `ALTER TABLE tests ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT true`
+    );
+    const result = await dbAdapter.execute(
+      `UPDATE tests SET is_active = false WHERE id = $1`,
+      [req.params.id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Test not found' });
+    }
+    res.json({ message: 'Test deactivated' });
+  } catch (error) {
+    console.error('Delete test error:', error);
+    res.status(500).json({ error: 'Failed to deactivate test' });
   }
 });
 
@@ -365,11 +521,21 @@ function calculateWholeShoeFlexing(inputData, clientSpecs) {
   };
 }
 
+function resolveBondSharedWidth(inputData) {
+  if (inputData.width != null && Number(inputData.width) > 0) {
+    return Number(inputData.width);
+  }
+  const withWidth = (inputData.point_data || []).find((point) => Number(point.width) > 0);
+  return withWidth ? Number(withWidth.width) : 0;
+}
+
 function calculateBondStrength(inputData, clientSpecs) {
-  const { client_spec_min_bond_strength, point_data } = inputData;
-  
+  const { client_spec_min_bond_strength, point_data = [] } = inputData;
+  const sharedWidth = resolveBondSharedWidth(inputData);
+
   const point_results = point_data.map(point => {
-    const bond_strength = point.width > 0 ? (point.force_applied * 9.8 / point.width) : 0;
+    const width = sharedWidth > 0 ? sharedWidth : (Number(point.width) || 0);
+    const bond_strength = width > 0 ? (point.force_applied * 9.8 / width) : 0;
     const passes = Number(bond_strength) >= Number(client_spec_min_bond_strength);
     return {
       ...point,

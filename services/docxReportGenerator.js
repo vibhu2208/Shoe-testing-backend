@@ -334,8 +334,16 @@ function expandBondStrengthPlaceholders(row, resultData = {}, calculatedResults 
     flat[`${prefix}_pass`] = point.passes ? 'PASS' : 'FAIL';
   });
 
-  if (calculatedResults.average_bond_strength != null) {
-    flat.average_bond_strength = formatNum(calculatedResults.average_bond_strength);
+  let averageBondStrength = calculatedResults.average_bond_strength;
+  if ((averageBondStrength == null || averageBondStrength === '') && points.length > 0) {
+    averageBondStrength =
+      points.reduce((sum, point) => sum + (Number(point.bond_strength) || 0), 0) / points.length;
+  }
+  if (averageBondStrength != null && averageBondStrength !== '') {
+    const formattedAverage = formatNum(averageBondStrength);
+    flat.average_bond_strength = formattedAverage;
+    flat.client_specification_result = `${formattedAverage} N/mm`;
+    flat.client_spec_result = flat.client_specification_result;
   }
   if (calculatedResults.min_point_value != null) {
     flat.min_point_value = formatNum(calculatedResults.min_point_value);
@@ -343,6 +351,13 @@ function expandBondStrengthPlaceholders(row, resultData = {}, calculatedResults 
   if (calculatedResults.points_passed != null) flat.points_passed = String(calculatedResults.points_passed);
   if (calculatedResults.points_failed != null) flat.points_failed = String(calculatedResults.points_failed);
   if (calculatedResults.result != null) flat.result = String(calculatedResults.result);
+
+  if (resultData.temperature != null && resultData.temperature !== '') {
+    flat.temperature = String(resultData.temperature);
+  }
+  if (resultData.humidity != null && resultData.humidity !== '') {
+    flat.humidity = String(resultData.humidity);
+  }
 
   return flat;
 }

@@ -446,6 +446,7 @@ router.get('/my-tests/:orderTestId', async (req, res) => {
         at.report_url,
         at.report_number,
         at.report_generated_at,
+        at.outsourced_report_url,
         at.template_key,
         at.template_name,
         at.is_periodic,

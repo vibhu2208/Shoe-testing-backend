@@ -17,12 +17,33 @@ const {
   assignmentMeta
 } = require('../services/defaultTester');
 const upload = multer({ storage: multer.memoryStorage() });
+const {
+  buildArticleBulkTemplateBuffer,
+  fetchLibraryTests
+} = require('../services/articleBulkTemplateService');
 
 const resolveTestAssignment = (test, defaultTesterId) => {
   const executionType = test.executionType || test.execution_type;
   const explicit = getExplicitTesterId(test);
   const testerId = resolveAssignedTester(explicit, defaultTesterId, executionType);
   return assignmentMeta(testerId);
+};
+
+const requireDeadlineForTest = (test, label = 'Test') => {
+  const executionType = (test.executionType || test.execution_type || '').toLowerCase();
+  if (executionType === 'inhouse' || executionType === 'both') {
+    const deadline = test.testDeadline || test.test_deadline;
+    if (!deadline) {
+      throw new Error(`${label}: due date (testDeadline) is required for in-house tests`);
+    }
+  }
+};
+
+const ensureVendorIdColumn = async () => {
+  await dbAdapter.execute(`
+    ALTER TABLE article_tests
+    ADD COLUMN IF NOT EXISTS vendor_id UUID
+  `);
 };
 
 const normalizeCell = (value) => {
@@ -36,13 +57,50 @@ const parseBulkRowsFromBuffer = (file) => {
   }
 
   const workbook = XLSX.read(file.buffer, { type: 'buffer' });
-  const firstSheet = workbook.SheetNames[0];
-  if (!firstSheet) {
+  const sheetName = workbook.SheetNames.find((name) => name.toLowerCase() === 'articles')
+    || workbook.SheetNames[0];
+  if (!sheetName) {
     throw new Error('No worksheet found in uploaded file');
   }
 
-  const sheet = workbook.Sheets[firstSheet];
+  const sheet = workbook.Sheets[sheetName];
   return XLSX.utils.sheet_to_json(sheet, { defval: '' });
+};
+
+const buildLibraryLookup = (tests) => {
+  const byId = new Map();
+  const byName = new Map();
+
+  tests.forEach((test) => {
+    byId.set(String(test.id).toUpperCase(), test);
+    byName.set(String(test.name).trim().toLowerCase(), test);
+  });
+
+  return { byId, byName };
+};
+
+const resolveTestFromLibrary = (row, lookup) => {
+  const inhouseTestId = normalizeCell(row.inhouseTestId);
+  const testName = normalizeCell(row.testName);
+  const libraryTest = inhouseTestId
+    ? lookup.byId.get(inhouseTestId.toUpperCase())
+    : (testName ? lookup.byName.get(testName.toLowerCase()) : null);
+
+  if (!libraryTest) {
+    return {
+      testName,
+      standard: normalizeCell(row.standard),
+      category: normalizeCell(row.category) || 'Finished Good',
+      inhouseTestId: inhouseTestId || null
+    };
+  }
+
+  return {
+    testName: testName || libraryTest.name,
+    standard: normalizeCell(row.standard) || libraryTest.standard || libraryTest.id,
+    category: normalizeCell(row.category) || libraryTest.category || 'Finished Good',
+    inhouseTestId: inhouseTestId || libraryTest.id
+  };
 };
 
 const createArticleWithTests = async ({
@@ -60,6 +118,8 @@ const createArticleWithTests = async ({
     error.statusCode = 400;
     throw error;
   }
+
+  await ensureVendorIdColumn();
 
   return dbAdapter.transaction(async (client) => {
     const articleResult = await client.query(`
@@ -93,15 +153,16 @@ const createArticleWithTests = async ({
       const defaultTesterId = await getDefaultTesterId(client);
 
       for (const test of tests) {
+        requireDeadlineForTest(test, test.testName || test.test_name || 'Test');
         const meta = resolveTestAssignment(test, defaultTesterId);
         await client.query(`
           INSERT INTO article_tests (
             article_id, batch_id, test_name, test_standard, client_requirement,
             category, execution_type, inhouse_test_id, vendor_name, vendor_contact,
             vendor_email, expected_report_date, assigned_tester_id, test_deadline,
-            assigned_at, assigned_by, notes, status
+            assigned_at, assigned_by, notes, status, vendor_id
           ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
           )
         `, [
           newArticle.id,
@@ -121,7 +182,8 @@ const createArticleWithTests = async ({
           meta.assigned_at,
           meta.assigned_by,
           test.notes || null,
-          meta.status
+          meta.status,
+          test.vendorId || test.vendor_id || null
         ]);
       }
     }
@@ -156,55 +218,17 @@ router.get('/clients/:clientId/articles', async (req, res) => {
   }
 });
 
-router.get('/clients/:clientId/articles/bulk-template', (req, res) => {
-  const headers = [
-    'articleNumber',
-    'articleName',
-    'materialType',
-    'color',
-    'description',
-    'testName',
-    'standard',
-    'clientRequirement',
-    'category',
-    'executionType',
-    'inhouseTestId',
-    'vendorName',
-    'vendorContact',
-    'vendorEmail',
-    'expectedReportDate',
-    'testDeadline',
-    'notes'
-  ];
+router.get('/clients/:clientId/articles/bulk-template', async (req, res) => {
+  try {
+    const fileBuffer = await buildArticleBulkTemplateBuffer();
 
-  const example = [{
-    articleNumber: 'ART-001',
-    articleName: 'Runner Shoe Model X',
-    materialType: 'Synthetic',
-    color: 'Black',
-    description: 'Sports shoe upper and sole assembly',
-    testName: 'Sole Abrasion',
-    standard: 'SATRA-TM-174',
-    clientRequirement: 'Max wear <= 200 mm3',
-    category: 'Finished Good',
-    executionType: 'inhouse',
-    inhouseTestId: 'SATRA-TM-174',
-    vendorName: '',
-    vendorContact: '',
-    vendorEmail: '',
-    expectedReportDate: '',
-    testDeadline: '2026-04-10',
-    notes: 'Priority sample'
-  }];
-
-  const workbook = XLSX.utils.book_new();
-  const sheet = XLSX.utils.json_to_sheet(example, { header: headers });
-  XLSX.utils.book_append_sheet(workbook, sheet, 'articles');
-  const fileBuffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-
-  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-  res.setHeader('Content-Disposition', 'attachment; filename="articles_bulk_template.xlsx"');
-  res.send(fileBuffer);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="articles_bulk_template.xlsx"');
+    res.send(Buffer.from(fileBuffer));
+  } catch (error) {
+    console.error('Error generating article bulk template:', error);
+    res.status(500).json({ error: 'Failed to generate bulk template' });
+  }
 });
 
 router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), async (req, res) => {
@@ -214,6 +238,9 @@ router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), as
     if (!rows.length) {
       return res.status(400).json({ error: 'No rows found in uploaded file' });
     }
+
+    const libraryTests = await fetchLibraryTests();
+    const libraryLookup = buildLibraryLookup(libraryTests);
 
     const groupedByArticle = new Map();
     rows.forEach((row, index) => {
@@ -235,25 +262,39 @@ router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), as
         });
       }
 
-      const testName = normalizeCell(row.testName);
-      if (testName) {
+      const resolved = resolveTestFromLibrary(row, libraryLookup);
+      const testName = resolved.testName;
+      const inhouseTestId = resolved.inhouseTestId;
+
+      if (testName || inhouseTestId) {
+        if (!testName) {
+          throw new Error(`Row ${index + 2}: testName is required when inhouseTestId is provided`);
+        }
+
         groupedByArticle.get(articleKey).tests.push({
           testName,
-          standard: normalizeCell(row.standard),
+          standard: resolved.standard || null,
           clientRequirement: normalizeCell(row.clientRequirement),
-          category: normalizeCell(row.category) || 'Finished Good',
+          category: resolved.category,
           executionType: (() => {
             const executionType = normalizeCell(row.executionType).toLowerCase();
             if (executionType === 'outsource') return 'outsource';
             if (executionType === 'both') return 'both';
             return 'inhouse';
           })(),
-          inhouseTestId: normalizeCell(row.inhouseTestId) || null,
+          inhouseTestId,
           vendorName: normalizeCell(row.vendorName) || null,
           vendorContact: normalizeCell(row.vendorContact) || null,
           vendorEmail: normalizeCell(row.vendorEmail) || null,
           expectedReportDate: normalizeCell(row.expectedReportDate) || null,
-          testDeadline: normalizeCell(row.testDeadline) || null,
+          testDeadline: (() => {
+            const deadline = normalizeCell(row.testDeadline) || null;
+            const executionType = normalizeCell(row.executionType).toLowerCase() || 'inhouse';
+            if ((executionType === 'inhouse' || executionType === 'both' || !executionType) && !deadline) {
+              throw new Error(`Row ${index + 2}: testDeadline is required for in-house tests`);
+            }
+            return deadline;
+          })(),
           notes: normalizeCell(row.notes) || null
         });
       }
@@ -291,6 +332,7 @@ router.post('/clients/:clientId/articles/bulk-upload', upload.single('file'), as
           const defaultTesterId = await getDefaultTesterId(client);
 
           for (const test of article.tests) {
+            requireDeadlineForTest(test, test.testName || 'Test');
             const meta = resolveTestAssignment(test, defaultTesterId);
             await client.query(`
               INSERT INTO article_tests (
@@ -478,24 +520,37 @@ router.put('/articles/:id', async (req, res) => {
     const { id } = req.params;
     const {
       articleName,
+      article_name,
       materialType,
+      material_type,
       color,
       description,
       specifications,
       status
     } = req.body;
-    
+
+    const name = articleName ?? article_name;
+    const material = materialType ?? material_type;
+
     await dbAdapter.execute(`
       UPDATE articles SET
-        article_name = $1,
-        material_type = $2,
-        color = $3,
-        description = $4,
-        specifications = $5,
-        status = $6,
+        article_name = COALESCE($1, article_name),
+        material_type = COALESCE($2, material_type),
+        color = COALESCE($3, color),
+        description = COALESCE($4, description),
+        specifications = COALESCE($5, specifications),
+        status = COALESCE($6, status),
         updated_at = NOW()
       WHERE id = $7
-    `, [articleName, materialType, color, description, JSON.stringify(specifications), status, id]);
+    `, [
+      name ?? null,
+      material ?? null,
+      color !== undefined ? color : null,
+      description !== undefined ? description : null,
+      specifications !== undefined ? JSON.stringify(specifications) : null,
+      status ?? null,
+      id
+    ]);
     
     res.json({ message: 'Article updated successfully' });
   } catch (error) {
@@ -625,6 +680,10 @@ router.put('/article-tests/:testId', async (req, res) => {
     const { testId } = req.params;
     const updates = { ...req.body };
 
+    if (Object.prototype.hasOwnProperty.call(updates, 'test_deadline') && !updates.test_deadline) {
+      return res.status(400).json({ error: 'Due date is required and cannot be cleared' });
+    }
+
     // Keep status aligned with tester assignment in autosave/edit flows.
     // If tester is selected -> assigned (unless already in-progress/submitted/pass/fail).
     // If tester is removed while status is assigned -> pending.
@@ -652,7 +711,8 @@ router.put('/article-tests/:testId', async (req, res) => {
       'test_name', 'test_standard', 'client_requirement', 'category', 
       'execution_type', 'status', 'inhouse_test_id', 'vendor_name', 
       'vendor_contact', 'vendor_email', 'expected_report_date', 
-      'assigned_tester_id', 'test_deadline', 'notes', 'result', 'result_data'
+      'assigned_tester_id', 'test_deadline', 'notes', 'result', 'result_data',
+      'vendor_id', 'outsourced_report_url'
     ];
     
     for (const field of allowedFields) {
@@ -701,6 +761,10 @@ router.post('/article-tests/:testId/assign', async (req, res) => {
   try {
     const { testId } = req.params;
     const { tester_id, deadline, notes } = req.body;
+
+    if (!deadline) {
+      return res.status(400).json({ error: 'Due date (deadline) is required when assigning a tester' });
+    }
     
     const assigned_by = 1; // Admin user ID
     
@@ -975,6 +1039,81 @@ router.get('/article-tests/:testId/download-report', async (req, res) => {
   } catch (error) {
     console.error('Download report error:', error);
     res.status(500).json({ error: 'Failed to download report' });
+  }
+});
+
+const outsourceUploadDir = path.join(__dirname, '../uploads/outsourced-reports');
+const outsourceStorage = multer.diskStorage({
+  destination: async (req, file, cb) => {
+    try {
+      await fs.mkdir(outsourceUploadDir, { recursive: true });
+      cb(null, outsourceUploadDir);
+    } catch (err) {
+      cb(err);
+    }
+  },
+  filename: (req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+    cb(null, `outsourced-${unique}${path.extname(file.originalname)}`);
+  },
+});
+const outsourceUpload = multer({
+  storage: outsourceStorage,
+  limits: { fileSize: 20 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const ok =
+      file.mimetype === 'application/pdf' ||
+      file.mimetype === 'application/msword' ||
+      file.mimetype ===
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+      file.mimetype === 'image/jpeg' ||
+      file.mimetype === 'image/png';
+    cb(ok ? null : new Error('Only PDF, Word, or image reports are allowed'), ok);
+  },
+});
+
+router.post(
+  '/article-tests/:testId/outsourced-report',
+  outsourceUpload.single('file'),
+  async (req, res) => {
+    try {
+      if (!req.file) {
+        return res.status(400).json({ error: 'File is required' });
+      }
+      const relativeUrl = `/uploads/outsourced-reports/${req.file.filename}`;
+      await dbAdapter.execute(
+        `UPDATE article_tests SET
+          outsourced_report_url = $1,
+          updated_at = NOW()
+         WHERE id = $2`,
+        [relativeUrl, req.params.testId]
+      );
+      res.json({
+        message: 'Outsourced report uploaded',
+        outsourced_report_url: relativeUrl,
+      });
+    } catch (error) {
+      console.error('Outsourced report upload error:', error);
+      res.status(500).json({ error: error.message || 'Failed to upload outsourced report' });
+    }
+  }
+);
+
+router.get('/article-tests/:testId/outsourced-report', async (req, res) => {
+  try {
+    const rows = await dbAdapter.query(
+      `SELECT outsourced_report_url FROM article_tests WHERE id = $1`,
+      [req.params.testId]
+    );
+    if (!rows.length || !rows[0].outsourced_report_url) {
+      return res.status(404).json({ error: 'No outsourced report uploaded' });
+    }
+    const absPath = path.resolve(__dirname, '..', rows[0].outsourced_report_url.replace(/^\//, ''));
+    await fs.access(absPath);
+    res.sendFile(absPath);
+  } catch (error) {
+    console.error('Download outsourced report error:', error);
+    res.status(500).json({ error: 'Failed to download outsourced report' });
   }
 });
 

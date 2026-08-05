@@ -22,6 +22,9 @@ const periodicRoutes = require('./routes/periodic');
 const adminMaintenanceRoutes = require('./routes/adminMaintenance');
 const dashboardExportRoutes = require('./routes/dashboardExport');
 const reportTemplateRoutes = require('./routes/reportTemplates');
+const vendorRoutes = require('./routes/vendors');
+const packageRoutes = require('./routes/packages');
+const misRoutes = require('./routes/mis');
 const { seedTemplatesFromFolders } = require('./services/reportTemplateService');
 
 const app = express();
@@ -598,6 +601,17 @@ if (process.env.NODE_ENV === 'production') {
 app.use('/api/admin/maintenance', adminMaintenanceRoutes);
 app.use('/api/admin/dashboard', dashboardExportRoutes);
 app.use('/api/reports', reportTemplateRoutes);
+
+if (process.env.NODE_ENV === 'production') {
+  app.use('/api/vendors', authenticateToken, vendorRoutes);
+  app.use('/api/packages', authenticateToken, packageRoutes);
+  app.use('/api/mis', authenticateToken, misRoutes);
+} else {
+  app.use('/api/vendors', vendorRoutes);
+  app.use('/api/packages', packageRoutes);
+  app.use('/api/mis', misRoutes);
+  console.log('🔓 Vendors / Packages / MIS routes mounted without authentication (development mode)');
+}
 
 // Initialize database
 const initDatabase = async () => {

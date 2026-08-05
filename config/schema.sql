@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS article_tests (
   vendor_email VARCHAR(255),
   expected_report_date DATE,
   outsourced_report_url TEXT,
+  vendor_id UUID,
   assigned_tester_id INTEGER,
   test_deadline DATE,
   assigned_at TIMESTAMP,
@@ -297,4 +298,37 @@ CREATE TABLE IF NOT EXISTS generated_reports (
   report_status VARCHAR(30) DEFAULT 'generated',
   generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   metadata JSONB
+);
+
+-- Vendors master
+CREATE TABLE IF NOT EXISTS vendors (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(255) NOT NULL,
+  contact_person VARCHAR(255),
+  email VARCHAR(255),
+  phone VARCHAR(50),
+  address TEXT,
+  notes TEXT,
+  status VARCHAR(20) DEFAULT 'active',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Test packages (bundles of library tests)
+CREATE TABLE IF NOT EXISTS test_packages (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name VARCHAR(255) NOT NULL,
+  description TEXT,
+  status VARCHAR(20) DEFAULT 'active',
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS test_package_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  package_id UUID NOT NULL REFERENCES test_packages(id) ON DELETE CASCADE,
+  test_id VARCHAR(50) NOT NULL,
+  test_name VARCHAR(255),
+  sort_order INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
